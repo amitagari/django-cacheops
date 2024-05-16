@@ -9,7 +9,7 @@ from funcy import decorator, identity, memoize, LazyObject
 import redis
 from redis.sentinel import Sentinel
 from .conf import settings
-
+from copy import deepcopy
 
 if settings.CACHEOPS_DEGRADE_ON_FAILURE:
     @decorator
@@ -79,8 +79,7 @@ class CacheopsRedis(redis.StrictRedis):
         self._unlock(keys=[key, signal_key])
 
 
-@LazyObject
-def redis_client():
+def redis_client(model=None):
     if settings.CACHEOPS_REDIS and settings.CACHEOPS_SENTINEL:
         raise ImproperlyConfigured("CACHEOPS_REDIS and CACHEOPS_SENTINEL are mutually exclusive")
 
@@ -100,10 +99,23 @@ def redis_client():
     if isinstance(settings.CACHEOPS_REDIS, six.string_types):
         return CacheopsRedis.from_url(settings.CACHEOPS_REDIS)
     else:
-        return CacheopsRedis(**settings.CACHEOPS_REDIS)
+        client = {}
+        cacheops_redis = deepcopy(settings.CACHEOPS_REDIS)
+        for app_model, profile in settings.CACHEOPS.items():
+            if profile is None:
+                continue
+            if 'host' in profile:
+                cacheops_redis['host'] = profile['host']
+            client[app_model.lower()] = CacheopsRedis(**cacheops_redis)
+            cacheops_redis['host'] = settings.CACHEOPS_REDIS['host']
+        if model is None:
+            cacheops_client = CacheopsRedis(**cacheops_redis)
+        else:
+            cacheops_client = client[model]
+        return cacheops_client
 
 
-### Lua script loader
+    ### Lua script loader
 
 import re
 import os.path
@@ -111,10 +123,11 @@ import os.path
 STRIP_RE = re.compile(r'TOSTRIP.*/TOSTRIP', re.S)
 
 @memoize
-def load_script(name, strip=False):
+def load_script(name, model=None, strip=False):
     filename = os.path.join(os.path.dirname(__file__), 'lua/%s.lua' % name)
     with open(filename) as f:
         code = f.read()
     if strip:
         code = STRIP_RE.sub('', code)
-    return redis_client.register_script(code)
+    cacheops_client = redis_client(model)
+    return cacheops_client.register_script(code)

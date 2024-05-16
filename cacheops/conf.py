@@ -57,7 +57,7 @@ def prepare_profiles():
             model_profiles[app_model.lower()] = None
             continue
 
-        model_profiles[app_model.lower()] = mp = merge(profile_defaults, profile)
+        model_profiles[app_model.lower()] = mp = merge(profile_defaults, profile, {'model': app_model.lower()})
         if mp['ops'] == 'all':
             mp['ops'] = ALL_OPS
         # People will do that anyway :)

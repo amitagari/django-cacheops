@@ -11,6 +11,7 @@ from .sharding import get_prefix
 from .redis import redis_client, handle_connection_failure, load_script
 from .signals import cache_invalidated
 from .transaction import queue_when_in_transaction
+from .conf import model_profile
 
 
 __all__ = ('invalidate_obj', 'invalidate_model', 'invalidate_all', 'no_invalidation')
@@ -21,9 +22,13 @@ __all__ = ('invalidate_obj', 'invalidate_model', 'invalidate_all', 'no_invalidat
 def invalidate_dict(model, obj_dict, using=DEFAULT_DB_ALIAS):
     if no_invalidation.active or not settings.CACHEOPS_ENABLED:
         return
+    profile = model_profile(model)
+    profile_model = None
+    if 'model' in profile:
+        profile_model = profile['model']
     model = model._meta.concrete_model
     prefix = get_prefix(_cond_dnfs=[(model._meta.db_table, list(obj_dict.items()))], dbs=[using])
-    load_script('invalidate')(keys=[prefix], args=[
+    load_script('invalidate', profile_model)(keys=[prefix], args=[
         model._meta.db_table,
         json.dumps(obj_dict, default=str)
     ])
@@ -52,10 +57,16 @@ def invalidate_model(model, using=DEFAULT_DB_ALIAS):
     # NOTE: if we use sharding dependent on DNF then this will fail,
     #       which is ok, since it's hard/impossible to predict all the shards
     prefix = get_prefix(tables=[model._meta.db_table], dbs=[using])
-    conjs_keys = redis_client.keys('%sconj:%s:*' % (prefix, model._meta.db_table))
+
+    profile = model_profile(model)
+    profile_model = None
+    if 'model' in profile:
+        profile_model = profile['model']
+    cacheops_client = redis_client(profile_model)
+    conjs_keys = cacheops_client.keys('%sconj:%s:*' % (prefix, model._meta.db_table))
     if conjs_keys:
-        cache_keys = redis_client.sunion(conjs_keys)
-        redis_client.delete(*(list(cache_keys) + conjs_keys))
+        cache_keys = cacheops_client.sunion(conjs_keys)
+        cacheops_client.delete(*(list(cache_keys) + conjs_keys))
     cache_invalidated.send(sender=model, obj_dict=None)
 
 
@@ -63,7 +74,19 @@ def invalidate_model(model, using=DEFAULT_DB_ALIAS):
 def invalidate_all():
     if no_invalidation.active or not settings.CACHEOPS_ENABLED:
         return
-    redis_client.flushdb()
+    default = False
+    for app_model, profile in settings.CACHEOPS.items():
+        if profile is None:
+            continue
+        if 'host' in profile:
+            cacheops_client = redis_client(app_model.lower())
+            cacheops_client.flushdb()
+        else:
+            default = True
+            continue
+    if default == True:
+        cacheops_client = redis_client()
+        cacheops_client.flushdb()
     cache_invalidated.send(sender=None, obj_dict=None)
 
 

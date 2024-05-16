@@ -31,14 +31,14 @@ _local_get_cache = {}
 
 
 @handle_connection_failure
-def cache_thing(prefix, cache_key, data, cond_dnfs, timeout, dbs=()):
+def cache_thing(prefix, cache_key, data, cond_dnfs, timeout, model=None, dbs=()):
     """
     Writes data to cache and creates appropriate invalidators.
     """
     # Could have changed after last check, sometimes superficially
     if transaction_states.is_dirty(dbs):
         return
-    load_script('cache_thing', settings.CACHEOPS_LRU)(
+    load_script('cache_thing', model, settings.CACHEOPS_LRU)(
         keys=[prefix, cache_key],
         args=[
             pickle.dumps(data, -1),
@@ -97,14 +97,17 @@ def cached_as(*samples, **kwargs):
 
             prefix = get_prefix(func=func, _cond_dnfs=cond_dnfs, dbs=dbs)
             cache_key = prefix + 'as:' + key_func(func, args, kwargs, key_extra)
-
-            with redis_client.getting(cache_key, lock=lock) as cache_data:
+            model = None
+            if 'model' in self._cacheprofile:
+                model = self._cacheprofile['model']
+            cacheops_client = redis_client(model)
+            with cacheops_client.getting(cache_key, lock=lock) as cache_data:
                 cache_read.send(sender=None, func=func, hit=cache_data is not None)
                 if cache_data is not None:
                     return pickle.loads(cache_data)
                 else:
                     result = func(*args, **kwargs)
-                    cache_thing(prefix, cache_key, result, cond_dnfs, timeout, dbs=dbs)
+                    cache_thing(prefix, cache_key, result, cond_dnfs, timeout, model, dbs=dbs)
                     return result
 
         return wrapper
@@ -175,9 +178,9 @@ class QuerySetMixin(object):
     def _cond_dnfs(self):
         return dnfs(self)
 
-    def _cache_results(self, cache_key, results):
+    def _cache_results(self, cache_key, results, model = None):
         cache_thing(self._prefix, cache_key, results,
-                    self._cond_dnfs, self._cacheprofile['timeout'], dbs=[self.db])
+                    self._cond_dnfs, self._cacheprofile['timeout'], model, dbs=[self.db])
 
     def cache(self, ops=None, timeout=None, lock=None):
         """
@@ -275,7 +278,11 @@ class QuerySetMixin(object):
         cache_key = self._cache_key()
         lock = self._cacheprofile['lock']
 
-        with redis_client.getting(cache_key, lock=lock) as cache_data:
+        model = None
+        if 'model' in self._cacheprofile:
+            model = self._cacheprofile['model']
+        cacheops_client = redis_client(model)
+        with cacheops_client.getting(cache_key, lock=lock) as cache_data:
             cache_read.send(sender=self.model, func=None, hit=cache_data is not None)
             if cache_data is not None:
                 self._result_cache = pickle.loads(cache_data)
@@ -288,7 +295,7 @@ class QuerySetMixin(object):
                     self._result_cache = list(self._iterable_class(self))
                 else:
                     self._result_cache = list(self.iterator())
-                self._cache_results(cache_key, self._result_cache)
+                self._cache_results(cache_key, self._result_cache, model)
 
         return self._no_monkey._fetch_all(self)
 
@@ -468,8 +475,11 @@ class ManagerMixin(object):
 
             key = 'pk' if cache_on_save is True else cache_on_save
             cond = {key: getattr(instance, key)}
+            model = None
+            if 'model' in cacheprofile:
+                model = cacheprofile[model]
             qs = sender.objects.inplace().filter(**cond).order_by()
-            qs._cache_results(qs._cache_key(), [instance])
+            qs._cache_results(qs._cache_key(), [instance], model)
 
             # Reverting stripped attributes
             instance.__dict__.update(unwanted_dict)
